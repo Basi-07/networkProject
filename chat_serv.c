@@ -25,42 +25,54 @@ int main(int argc, char *argv[])
 	int clnt_adr_sz; //클라이언트 주소 구조체 크기
 	pthread_t t_id; //새로 생성될 스레드 ID
 	if(argc!=2) { //프로그램 실행 시 Port#를 받지 않았을 경우
-		printf("Usage : %s <port>\n", argv[0]);
-		exit(1);
+		printf("Usage : %s <port>\n", argv[0]); //사용자에게 올바른 사용법 알려주기 위한 안내메세지 보여줌
+		exit(1); //프로그램 종료
 	}
   
 	pthread_mutex_init(&mutx, NULL); //clnt_cnt와 clnt_socks의 동시 접근을 막기 위한 뮤텍스 초기화
+	//1. 소켓 생성
 	serv_sock=socket(PF_INET, SOCK_STREAM, 0); //TCP 소켓 생성
 
+	//2. 서버 주소 정보 초기화 및 설정
 	memset(&serv_adr, 0, sizeof(serv_adr)); //서버 주소 초기화
 	serv_adr.sin_family=AF_INET; //IPv4
-	serv_adr.sin_addr.s_addr=htonl(INADDR_ANY); //모든 인터페이스 접속 허용
+	serv_adr.sin_addr.s_addr=htonl(INADDR_ANY); //모든 인터페이스 접속 허용,IP주소를 자동으로 할당
  	serv_adr.sin_port=htons(atoi(argv[1])); //서버 Port#
 	
+	//3. bind(소켓에 주소 정보 할당)
 	if(bind(serv_sock, (struct sockaddr*) &serv_adr, sizeof(serv_adr))==-1) //소켓 주소 정보 할당
 		error_handling("bind() error"); //바인딩 실패시 오류 처리
+	
+	//4. listen(연결 요청 대기 상태)
 	if(listen(serv_sock, 5)==-1) //클라이언트 연결 요청 대기
 		error_handling("listen() error"); //리슨 실패시 오류 처리
 	
+	//5. accept(클라이언트 연결 요청 수락)
 	while(1) //클라이언트 연결 계속 대기
 	{
 		clnt_adr_sz=sizeof(clnt_adr); //클라이언트 주소 구조체 크기 설정
 		clnt_sock=accept(serv_sock, (struct sockaddr*)&clnt_adr,&clnt_adr_sz); //클라이언트 연결 요청 수락
 		
+		//임계 구역 시작
+		//새로운 클라이언트 정보를 전역 변수에 등록 
 		pthread_mutex_lock(&mutx); //clnt_socks 배열 접근 전 뮤텍스 잠금
 		clnt_socks[clnt_cnt++]=clnt_sock; //새로 연결된 클라이언트 소켓을 배열에 추가 후 클라이언트 수 증가
 		pthread_mutex_unlock(&mutx); //clnt_socks 배열 접근 후 뮤텍스 잠금 해제
-	
+		
+		//6. 클라이언트 처리를 위한 스레드 생성
 		pthread_create(&t_id, NULL, handle_clnt, (void*)&clnt_sock); //새로운 스레드가 형성되어 함수가 클라이언트 소켓을 인자로 받아 실행됨
+		
+		//종료되길 기다릴 필요 없이 즉시 다음 클라이언트 받을 수 있음
 		pthread_detach(t_id); //메모리 누수를 막기 위해 스레드를 메인 스레드로 부터 분리하여 스레드 종료 시 자동으로 해제
 		printf("Connected client IP: %s \n", inet_ntoa(clnt_adr.sin_addr)); //연결된 클라이언트 IP 주소 출력
 	}
 	close(serv_sock); //서버 소켓 닫음
 	return 0; //함수 종료
 }
-	
+
+//클라이언트 1명당 1개씩 생성
 void* handle_clnt(void* arg) //클라이언트 요청 처리 스레드 함수
-{
+{	
 	int clnt_sock = *((int*)arg); //스레드 생성 시 전달받은 소켓 디스크립터
 	int str_len = 0, i; //메세지 길이
 	char msg[BUF_SIZE]; //클라이언트로부터 받은 메세지를 저장할 버퍼
