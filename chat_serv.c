@@ -9,6 +9,7 @@
 
 #define BUF_SIZE 100 //메세지 버퍼 크기
 #define MAX_CLNT 256 //최대 동시 접속 클라이언트 수
+#define NAME_SIZE 20 //이름 크기 정의
 
 void * handle_clnt(void * arg); //클라이언트 요청 처리 함수
 void send_msg(char * msg, int len); //클라이언트 메세지 전송
@@ -16,6 +17,7 @@ void error_handling(char * msg); //오류 발생 시 메세지 출력&종료 함수
 
 int clnt_cnt=0; //현재 접속된 클라이언트 수를 저장하는 변수
 int clnt_socks[MAX_CLNT]; //연결된 클라이언트들의 소켓 디스크립터 배열
+char clnt_names[MAX_CLNT][NAME_SIZE] = {0,}; //이름 저장 배열
 pthread_mutex_t mutx; //멀티스레드 환경에서 자원보호를 위한 뮤텍스
 
 int main(int argc, char *argv[])
@@ -52,11 +54,11 @@ int main(int argc, char *argv[])
 	{
 		clnt_adr_sz=sizeof(clnt_adr); //클라이언트 주소 구조체 크기 설정
 		clnt_sock=accept(serv_sock, (struct sockaddr*)&clnt_adr,&clnt_adr_sz); //클라이언트 연결 요청 수락
-		
+
 		//임계 구역 시작
 		//새로운 클라이언트 정보를 전역 변수에 등록 
 		pthread_mutex_lock(&mutx); //clnt_socks 배열 접근 전 뮤텍스 잠금
-		clnt_socks[clnt_cnt++]=clnt_sock; //새로 연결된 클라이언트 소켓을 배열에 추가 후 클라이언트 수 증가
+        clnt_list[clnt_cnt].sock = clnt_sock; //클라이언트 소켓 번호를 배열의 현재 위치에 저장
 		pthread_mutex_unlock(&mutx); //clnt_socks 배열 접근 후 뮤텍스 잠금 해제
 		
 		//6. 클라이언트 처리를 위한 스레드 생성
@@ -76,30 +78,86 @@ void* handle_clnt(void* arg) //클라이언트 요청 처리 스레드 함수
 	int clnt_sock = *((int*)arg); //스레드 생성 시 전달받은 소켓 디스크립터
 	int str_len = 0, i; //메세지 길이
 	char msg[BUF_SIZE]; //클라이언트로부터 받은 메세지를 저장할 버퍼
+	int my_idx = -1; // 현재 클라이언트의 배열 인덱스
 
-	while ((str_len = read(clnt_sock, msg, sizeof(msg))) != 0) //클라이언트로부터 메세지 읽음
-		send_msg(msg, str_len); //읽은 메세지를 모든 클라이언트에게 전송
+    //현재 클라이언트의 인덱스 찾기
+    pthread_mutex_lock(&mutx); //배열 접근을 위해 뮤텍스 잠금
+    for (i = 0; i < clnt_cnt; i++) {
+        if (clnt_sock == clnt_socks[i]) { //소켓이 배열에 있는지 확인
+            my_idx = i; //자신의 인덱스 찾음
+            break;
+        }
+    }
+    pthread_mutex_unlock(&mutx); //뮤텍스 해제
 
-	pthread_mutex_lock(&mutx); //클라이언트 연결이 끊어졌을 때 clnt_socks 배열 접근 전 뮤텍스 잠금
-	for (i = 0; i < clnt_cnt; i++) //현재 연결된 클라이언트 수만큼 반복
-	{
-		if (clnt_sock == clnt_socks[i]) //연결이 끊긴 클라이언트의 소켓을 배열에서 찾으면
-		{
-			while (i < clnt_cnt - 1) //해당 소켓을 제거하고 배열 뒤의 요소들을 한 칸씩 앞으로 당김
-			{
-				clnt_socks[i] = clnt_socks[i + 1];
-				i++; //다음 요소로 이동
-			}
-			break; //해당 소켓을 찾고 제거했으면 종료
-		}
-	}
+    while ((str_len = read(clnt_sock, msg, sizeof(msg)-1)) > 0) { //메세지를 계속 읽음
+        msg[str_len] = 0; //종료 문자 추가
+
+        //클라이언트의 이름이 아직 등록되지 않았다면
+        if (strlen(clnt_names[my_idx]) == 0) {
+            char* start = strchr(msg, '['); //메세지에서 이름을 추출하여 등록
+            char* end = strchr(msg, ']');
+            if (start != NULL && end != NULL && (end > start)) { //이름 형식 맞으면 배열에 저장
+                strncpy(clnt_names[my_idx], start + 1, end - start - 1); //이름 안의 문자열 복사
+                //strncpy는 NULL 문자를 보장하지 않으므로 직접 추가
+                clnt_names[my_idx][end - start - 1] = '\0'; //문자열 끝에 직접 NULL추가
+            }
+        }
+        
+        char* whisper_ptr = strstr(msg, "@"); // 메세지 내용에서 @를 찾아 귓속말인지 판별
+        char* name_end_bracket = strchr(msg, ']'); // 이름 끝남
+		//귓속말 형식
+        if (whisper_ptr != NULL && name_end_bracket != NULL && whisper_ptr == (name_end_bracket + 2)) {
+            char to_name[NAME_SIZE] = {0,}; //받을 사람 이름 저장 변수
+            char notice_msg[BUF_SIZE]; //알림 메세지 버퍼
+            int target_idx = -1; //대상 클라이언트 인덱스
+
+            sscanf(whisper_ptr, "@%s", to_name); //받는 사람 이름 파싱
+
+            pthread_mutex_lock(&mutx); //받는 사람의 인덱스 찾기
+            for (i = 0; i < clnt_cnt; i++) {
+                if (strcmp(to_name, clnt_names[i]) == 0) { //이름 비교
+                    target_idx = i;
+                    break;
+                }
+            }
+            pthread_mutex_unlock(&mutx); //잠금 해제
+
+            if (target_idx != -1) { //귓속말 전송
+                write(clnt_socks[target_idx], msg, strlen(msg)); //받는 사람에게 전송
+                write(clnt_sock, msg, strlen(msg)); //보낸 사람에게도 전송
+            } else {
+                //사용자가 없는 경우, 보낸 사람에게만 알림
+                sprintf(notice_msg, " %s를 찾을 수 없습니다. ##\n", to_name);
+                write(clnt_sock, notice_msg, strlen(notice_msg));
+            }
+        }
+        else { //귓속말이 아닌 경우 그냥 전송
+            send_msg(msg, strlen(msg));
+        }
+    }
+
+    //연결 종료 처리
+    pthread_mutex_lock(&mutx);
+    for (i = 0; i < clnt_cnt; i++)
+    {
+        if (clnt_sock == clnt_socks[i]) {
+            //나가는 클라이언트의 이름 정보를 지우고 배열을 한 칸씩 당김
+            while (i < clnt_cnt - 1) {
+                clnt_socks[i] = clnt_socks[i + 1]; //소켓이동
+                strcpy(clnt_names[i], clnt_names[i+1]); //이름이동
+                i++;
+            }
+            break; //찾으면 종료
+        }
+    }
 	clnt_cnt--; //전체 클라이언트 수 감소
 	pthread_mutex_unlock(&mutx); //clnt_socks 배열 접근 후 뮤텍스 잠금 해제
 	close(clnt_sock); //해당 클라이언트 소켓 닫기
 	return NULL; //스레드 종료
 }
 
-void send_msg(char* msg, int len) // 모든 클라이언트에게 메시지를 전송하는 함수
+void send_msg(char* msg, int len) //모든 클라이언트에게 메시지를 전송하는 함수
 {
 	int i;
 	pthread_mutex_lock(&mutx); //clnt_socks 배열 접근 전 뮤텍스 잠금
